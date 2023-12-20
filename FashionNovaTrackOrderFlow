@@ -1,0 +1,125 @@
+from datetime import datetime
+from pytz import timezone
+
+# current datetime formatting
+date_format = '%Y-%m-%d %H:%M:%S%z'
+now = datetime.now(timezone('America/Los_Angeles'))
+
+def handler(pd: "pipedream"):
+
+    #values taken from the previous steps in a Pipedream flow
+
+    status = pd.steps["Fetch_order_data_from_FN_API"]["$return_value"]["status"]
+    shipping_method = pd.steps["Fetch_order_data_from_FN_API"]["$return_value"]["shipping_method"]
+    order_timestamp = pd.steps["Fetch_order_data_from_Gorgias"]["$return_value"]["order_created"]
+    t = datetime.strptime(order_timestamp, "%Y-%m-%dT%H:%M:%S%z")
+    t_pst = t.astimezone(timezone('America/Los_Angeles'))
+
+    price = float(pd.steps["Fetch_order_data_from_Gorgias"]["$return_value"]["price"])
+    eta = pd.steps["Fetch_order_data_from_FN_API"]["$return_value"]["estimated_delivery_date"]
+
+    t_pst = t_pst.replace(tzinfo=None)
+    now_pst = now.replace(tzinfo=None)
+
+    delta_time = (now_pst - t_pst).days
+    days = int(delta_time)
+    
+    decision = 'ticket'
+
+    # STANDARD
+    if shipping_method.lower() == 'standard':
+
+        # check the spelling of unfulfilled on their API side
+        if status.lower() == 'unfulfilled':
+            if days <= 3:
+                decision = "SLA"
+            if 15 > days > 3:
+                # endpoint does not contain the price information
+                if price >= 50:
+                    decision = "refund shipping"
+                else:
+                    decision = "$15"  
+            
+            if days > 15:
+                decision = "refund"
+
+        elif status.lower() in ("fulfilled", "shipped"):
+            if days <= 7:
+                decision = "ETA"
+            else:
+                decision = "$10"
+
+    # Express
+    if shipping_method.lower() == 'express':
+
+        # check the spelling of unfulfilled on their API side
+        if status.lower() == "unfulfilled":
+            if days < 1:
+                decision = "SLA"
+            elif days < 2:
+                decision = "refund shipping"
+            else:
+                decision = "refund"
+
+        if status.lower() in ("fulfilled", "shipped"):
+            if days < 2:
+                decision = "ETA"
+            elif days < 4:
+                decision = "$10"
+            else: 
+                decision = "refund"
+
+        elif status.lower() == 'fulfilled':
+            if days <= 7:
+                decision = "ETA"
+            else:
+                decision = "$10"
+
+    # Rushed
+    if shipping_method.lower() == "rushed":
+
+        # check the spelling of unfulfilled on their API side
+        if status.lower() == "unfulfilled":
+            if days < 1:
+                decision = "SLA"
+            elif days < 2:
+                decision = "refund shipping"
+            else:
+                decision = "refund"
+                
+        if status.lower() in ("fulfilled", "shipped"):
+            if days < 1:
+                decision = "ETA"
+            elif days < 2:
+                decision = "refund shipping"
+            else: 
+                decision = "refund"
+
+    return decision
+
+#####################################################################
+
+def handler(pd: "pipedream"):
+
+    # values from previous steps
+    decision = pd.steps["calculate_order_delta_time_and_scenario"]["$return_value"]
+    eta = pd.steps["Fetch_order_data_from_FN_API"]["$return_value"]["estimated_delivery_date"]
+    eta = eta.split('+')[0].replace('T', ' ')
+    print(eta)
+
+    decision_dict = {
+        "SLA": "Great news. Your order is being processed in our warehouse and is expected to be delivered in time.",
+        "$15": "We are sorry about your order being delayed. Here's a $15 coupon: 3SDAX128.",
+        "refund": "We are sorry for the inconvenience, we will fully refund the order in 3-5 business days.",
+        "$10": "We are sorry for the inconvenience. Here's a $10 coupon: 3SDAX128.",
+        "ETA": "Great news, your order has shipped! Current ETA for the order delivery is " + eta + " Pacific Standard Time",
+        "refund shipping": "We're sorry your order is delayed. Let us offer free shipping to mitigate the delay with the delivery.",       
+        "ticket": "We're sorry for the delay. Our support team will be in touch shortly to make things right."
+    }
+
+    # adjusting the object so it can be returned to Gorgias flow in the next step
+
+    final = str({"data": (decision_dict[decision])}).replace("'", '"')
+    return final
+
+
